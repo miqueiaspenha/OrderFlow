@@ -1,0 +1,55 @@
+@baseUrl = http://127.0.0.1:5000
+
+### Criar pedido válido
+POST {{baseUrl}}/pedidos
+Content-Type: application/json
+
+{
+    "clienteId": "cliente-123",
+    "itens": [
+        {
+            "produtoId": "produto-001",
+            "quantidade": 2,
+            "precoUnitario": 29.90
+        }
+    ]
+}
+
+### Testar pedido sem cliente
+POST  {{baseUrl}}/pedidos
+Content-Type: application/json
+
+{
+    "clienteId": "",
+    "itens": [
+        {
+            "produtoId": "produto-001",
+            "quantidade": 2,
+            "precoUnitario": 29.90
+        }
+    ]
+}
+
+### Testar quantidade inválida
+POST {{baseUrl}}/pedidos
+Content-Type: application/json
+
+{
+    "clienteId": "cliente-123",
+    "itens": [
+        {
+            "produtoId": "produto-001",
+            "quantidade": -1,
+            "precoUnitario": 29.90
+        }
+    ]
+}
+
+### Testar pedido sem itens
+POST {{baseUrl}}/pedidos
+Content-Type: application/json
+
+{
+    "clienteId": "cliente-123",
+    "itens": []
+}

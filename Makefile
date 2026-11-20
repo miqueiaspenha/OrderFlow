@@ -2,16 +2,18 @@
 
 COMPOSE := docker compose --env-file deploy/.env -f deploy/compose.yaml
 API_PROJECT := src/OrderFlow.Api
+WORKER_PROJECT := src/OrderFlow.Worker
 API_URL := http://127.0.0.1:5000
 
-.PHONY: help setup check-env up stop down ps logs build api dev test-api
+.PHONY: help setup check-env up stop down ps logs build api worker dev test-api
 
 help:
 	@printf 'OrderFlow - comandos disponíveis\n\n'
 	@printf '  make setup     Criar deploy/.env a partir do exemplo (se ainda não existir)\n'
 	@printf '  make up        Subir o RabbitMQ com Docker Compose\n'
 	@printf '  make api       Executar a API .NET 10 localmente\n'
-	@printf '  make dev       Subir RabbitMQ e executar a API\n'
+	@printf '  make worker    Executar o consumidor RabbitMQ .NET 10 localmente\n'
+	@printf '  make dev       Subir RabbitMQ e executar a API (Worker em outro terminal)\n'
 	@printf '  make test-api  Enviar um pedido de teste (API deve estar rodando)\n'
 	@printf '  make build     Compilar a solução\n'
 	@printf '  make ps        Ver status dos serviços\n'
@@ -51,6 +53,9 @@ build:
 
 api:
 	DOTNET_ENVIRONMENT=Development dotnet run --project $(API_PROJECT) --no-launch-profile --urls $(API_URL)
+
+worker:
+	DOTNET_ENVIRONMENT=Development dotnet run --project $(WORKER_PROJECT) --no-launch-profile
 
 dev: up api
 

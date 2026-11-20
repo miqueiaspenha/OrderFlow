@@ -1,33 +1,39 @@
 # OrderFlow
 
-Laboratório de backend com **.NET 10**, API REST, RabbitMQ e Docker. O projeto simula a recepção de pedidos e evoluirá para processamento assíncrono com um Worker.
+Laboratório de backend com **.NET 10**, API REST, RabbitMQ e Docker. O sistema simula o recebimento e o processamento assíncrono de pedidos.
 
-## Estado atual
+## Estado do projeto
 
-- **OrderFlow.Api:** endpoint `POST /pedidos`, validação básica e publicação de `PedidoCriado` na fila `pedidos.criados` com confirmação de publicação.
-- **RabbitMQ:** roda localmente pelo Docker Compose em `deploy/compose.yaml`.
-- **Makefile:** automatiza configuração inicial, inicialização do RabbitMQ, execução da API, testes manuais e comandos de manutenção.
-- **Testes manuais:** requisições REST Client em `tests/pedidos.http` e `make test-api`.
-- **Ainda não implementado nesta etapa documentada:** Worker, persistência, consulta de status e testes automatizados.
+- **OrderFlow.Api:** endpoint `POST /pedidos`, validação básica e publicação do evento `PedidoCriado` na fila `pedidos.criados`, com confirmação de publicação pelo RabbitMQ.
+- **OrderFlow.Worker:** consumidor implementado em .NET Worker Service (`BackgroundService`), responsável por desserializar eventos, registrar o processamento nos logs e confirmar o recebimento com ACK manual.
+- **RabbitMQ:** executado localmente com Docker Compose (`deploy/compose.yaml`).
+- **Makefile:** atalhos para iniciar infraestrutura, executar API e Worker, compilar e fazer testes manuais.
+- **Testes manuais:** `tests/pedidos.http` com REST Client ou `make test-api` com `curl`.
+- **Ainda não implementado:** persistência de pedidos, consulta de status, retry/DLQ, idempotência, testes automatizados e observabilidade.
 
-> `202 Accepted` significa que o broker confirmou a publicação, **não** que o pedido já foi processado.
+> `202 Accepted` significa que o broker confirmou a publicação, **não** que o Worker concluiu o processamento. Nesta etapa, o processamento do Worker se limita a registrar informações no log.
 
-## Arquitetura atual
+## Arquitetura local
 
 ```text
 REST Client / curl
        |
        | POST /pedidos
        v
-OrderFlow.Api (.NET 10 executado localmente)
+OrderFlow.Api (.NET 10, processo local)
        |
        | publica PedidoCriado
        v
 RabbitMQ (Docker, fila pedidos.criados)
        |
+       | consome evento
        v
-OrderFlow.Worker (próxima etapa)
+OrderFlow.Worker (.NET 10, processo local)
+       |
+       +--> logs + ACK manual
 ```
+
+O RabbitMQ é o único componente que precisa rodar no Docker para este estágio. A API e o Worker são processos .NET locais, permitindo depuração com breakpoints.
 
 ## Pré-requisitos
 
@@ -37,38 +43,35 @@ OrderFlow.Worker (próxima etapa)
 - Git
 - Opcional: VS Code com a extensão **REST Client** (`humao.rest-client`)
 
-Os comandos devem ser executados na **raiz do repositório**. Os exemplos usam terminal Linux com **ZSH** (também são compatíveis com Bash, exceto o comando `read` indicado abaixo).
+Execute os comandos na **raiz do repositório**. Os exemplos de terminal consideram Linux com **ZSH**; os comandos `make` também funcionam com Bash.
 
-## Primeira configuração (uma vez por computador)
+## Primeira configuração (uma vez por máquina)
 
-### 1. Clonar e restaurar
+### 1. Clonar, restaurar e compilar
 
 ```bash
 git clone https://github.com/miqueiaspenha/OrderFlow.git
 cd OrderFlow
 dotnet restore
+make build
 ```
 
-Se já tiver clonado, apenas acesse a pasta do projeto.
+Se o projeto já estiver clonado, apenas entre na pasta. O Worker precisa estar presente em `src/OrderFlow.Worker` e adicionado à solução `OrderFlow.slnx`.
 
-### 2. Criar as configurações locais do RabbitMQ
-
-O Makefile simplifica a criação do arquivo de ambiente:
+### 2. Configurar o RabbitMQ no Docker
 
 ```bash
 make setup
 ```
 
-O comando copia `deploy/.env.example` para `deploy/.env` **apenas se o arquivo ainda não existir**. Depois, edite `deploy/.env` e defina uma senha própria:
+O comando cria `deploy/.env` a partir de `deploy/.env.example` **sem sobrescrever um arquivo existente**. Edite `deploy/.env`:
 
 ```dotenv
 RABBITMQ_USER=orderflow
 RABBITMQ_PASSWORD=troque-por-uma-senha-forte
 ```
 
-O arquivo `.env` é ignorado pelo Git. Não envie credenciais ao repositório.
-
-### 3. Subir o RabbitMQ
+O arquivo é ignorado pelo Git e não deve ser versionado. Inicie e confira a infraestrutura:
 
 ```bash
 make up
@@ -77,141 +80,152 @@ make ps
 
 | Serviço | Endereço |
 | --- | --- |
-| RabbitMQ / AMQP | `localhost:5672` |
+| AMQP | `localhost:5672` |
 | Painel RabbitMQ | http://localhost:15672 |
 
-Entre no painel com as credenciais definidas em `deploy/.env`. O virtual host é **`orderflow`**.
+No painel, use as credenciais do `.env`. O virtual host é **`orderflow`**.
 
-> O RabbitMQ cria usuário, senha e virtual host no **primeiro uso do volume**. Alterar `deploy/.env` posteriormente não redefine automaticamente as credenciais já existentes.
+> A configuração inicial de usuário/senha é aplicada quando o volume do RabbitMQ é criado. Editar o `.env` posteriormente **não muda automaticamente** as credenciais que já existem no broker.
 
-### 4. Configurar .NET User Secrets
+### 3. Configurar os User Secrets da API e do Worker
 
-O `UserSecretsId` já está no arquivo `src/OrderFlow.Api/OrderFlow.Api.csproj`, mas os valores são específicos de cada máquina.
+Os dois projetos usam as **mesmas credenciais**, mas têm **UserSecretsId independentes**. Configure as chaves nos dois projetos. Se o Worker ainda não tiver um `UserSecretsId`, execute antes:
 
 ```bash
-dotnet user-secrets set 'RabbitMQ:Host' 'localhost' --project src/OrderFlow.Api
-dotnet user-secrets set 'RabbitMQ:VirtualHost' 'orderflow' --project src/OrderFlow.Api
-dotnet user-secrets set 'RabbitMQ:UserName' 'orderflow' --project src/OrderFlow.Api
+dotnet user-secrets init --project src/OrderFlow.Worker
 ```
 
-Se o usuário do `.env` for diferente, ajuste `RabbitMQ:UserName` também. **No ZSH**, configure a senha sem incluí-la diretamente no histórico:
+Configure host, virtual host e usuário (substitua `orderflow` se você escolheu outro usuário no `.env`):
+
+```bash
+for projeto in src/OrderFlow.Api src/OrderFlow.Worker; do
+  dotnet user-secrets set 'RabbitMQ:Host' 'localhost' --project "$projeto"
+  dotnet user-secrets set 'RabbitMQ:VirtualHost' 'orderflow' --project "$projeto"
+  dotnet user-secrets set 'RabbitMQ:UserName' 'orderflow' --project "$projeto"
+done
+```
+
+**No ZSH**, informe a senha sem mostrá-la na tela ou inseri-la no histórico:
 
 ```zsh
 read -rs 'RABBITMQ_PASSWORD?Senha do RabbitMQ: '
 echo
-dotnet user-secrets set 'RabbitMQ:Password' "$RABBITMQ_PASSWORD" --project src/OrderFlow.Api
+for projeto in src/OrderFlow.Api src/OrderFlow.Worker; do
+  dotnet user-secrets set 'RabbitMQ:Password' "$RABBITMQ_PASSWORD" --project "$projeto"
+done
 unset RABBITMQ_PASSWORD
 ```
 
-> No Bash, a leitura da senha seria `read -rsp 'Senha do RabbitMQ: ' RABBITMQ_PASSWORD`. O ZSH usa a sintaxe acima.
+> No Bash, o comando para ler a senha é `read -rsp 'Senha do RabbitMQ: ' RABBITMQ_PASSWORD`.
 
-Os User Secrets **não são criptografados**: use-os apenas em desenvolvimento. Se houver variáveis de ambiente anteriores, remova-as da sessão, pois elas prevalecem sobre os User Secrets:
+Os User Secrets **não são criptografados**: são apropriados para desenvolvimento. As variáveis de ambiente têm precedência; se existirem valores antigos, remova-os do terminal:
 
 ```bash
 unset RabbitMQ__Host RabbitMQ__VirtualHost RabbitMQ__UserName RabbitMQ__Password
 ```
 
-### 5. Compilar e executar a API
+## Execução diária
 
-```bash
-make build
-make api
-```
+Você pode iniciar a API e o Worker em **terminais separados**, na raiz do projeto:
 
-Mantenha o terminal da API aberto. A aplicação deverá escutar em `http://127.0.0.1:5000`.
-
-## Automação com Makefile
-
-O arquivo `Makefile`, na raiz do repositório, concentra os comandos do ambiente local. **Não é necessário memorizar os parâmetros do Docker Compose e do `dotnet run`.** Execute `make` ou `make help` para consultar as opções.
-
-| Comando | O que faz |
-| --- | --- |
-| `make help` | Lista os comandos disponíveis. |
-| `make setup` | Cria `deploy/.env` a partir do exemplo, sem sobrescrever um arquivo existente. |
-| `make up` | Sobe o RabbitMQ pelo Docker Compose. |
-| `make api` | Executa a API .NET 10 em modo Development na porta 5000. |
-| `make dev` | Sobe o RabbitMQ e, em seguida, inicia a API **no mesmo terminal**. |
-| `make test-api` | Envia um pedido válido via `curl` para a API em execução. |
-| `make build` | Compila a solução. |
-| `make ps` | Mostra o estado dos containers do Compose. |
-| `make logs` | Acompanha os logs do RabbitMQ. |
-| `make stop` | Para o RabbitMQ, preservando containers e dados. |
-| `make down` | Remove o container e a rede do Compose, preservando o volume. |
-
-**Atenção:** `make setup` não define sua senha automaticamente. Configure `deploy/.env` e os User Secrets **uma vez por máquina** antes de usar `make dev`. `make stop` e `make down` agem sobre os serviços Docker: não encerram uma API iniciada em outro terminal. Para parar o `make api`/`make dev`, pressione `Ctrl+C` no terminal correspondente.
-
-## Uso diário
-
-Depois da configuração inicial, basta executar **em um terminal**:
+**Terminal 1 — subir RabbitMQ e executar API:**
 
 ```bash
 make dev
 ```
 
-Isso inicializa o RabbitMQ e executa a API localmente. Deixe esse terminal aberto e use **outro terminal** para enviar um pedido:
+Esse comando executa `make up` e inicia a API em `http://127.0.0.1:5000`. Deixe o terminal aberto.
+
+**Terminal 2 — executar o Worker:**
+
+```bash
+make worker
+```
+
+O Worker deverá ficar aguardando mensagens na fila. Para interrompê-lo, use `Ctrl+C` nesse terminal.
+
+**Terminal 3 — enviar um pedido de teste:**
 
 ```bash
 make test-api
 ```
 
-Se preferir executar a infraestrutura e a API separadamente, use `make up` em um terminal e `make api` em outro.
+Alternativamente, abra `tests/pedidos.http` com a extensão REST Client e clique em **Send Request**.
 
-## Testar a API
+### O que esperar
 
-### Pelo REST Client
+1. A API recebe `POST /pedidos`, valida o JSON e publica `PedidoCriado`.
+2. A API retorna **HTTP 202 Accepted**, incluindo um `pedidoId` e `status: "Enfileirado"`.
+3. O Worker consome a mensagem, registra `PedidoId`/`ClienteId` nos logs e envia **ACK** após esse processamento inicial.
+4. A fila fica sem mensagens prontas se todos os eventos tiverem sido consumidos.
 
-Abra `tests/pedidos.http` no VS Code/OpenVSCode com a extensão REST Client e clique em **Send Request** acima da requisição desejada.
-
-### Pelo Makefile
-
-Com a API em execução:
-
-```bash
-make test-api
-```
-
-Resultado esperado: HTTP **202 Accepted**, contendo `pedidoId` e `status: "Enfileirado"`. Pedidos inválidos devem retornar **400 Bad Request**.
-
-Para conferir quantas mensagens aguardam consumo:
+Para conferir o estado da fila:
 
 ```bash
-docker exec orderflow-rabbitmq rabbitmqctl list_queues -p orderflow name messages_ready consumers
+docker exec orderflow-rabbitmq \
+  rabbitmqctl list_queues -p orderflow \
+  name messages_ready messages_unacknowledged consumers
 ```
 
-Sem o Worker, as mensagens permanecerão na fila.
+Após o processamento completo, a saída deve indicar `messages_ready=0`, `messages_unacknowledged=0` e normalmente `consumers=1` com o Worker conectado. Se houver mensagens antigas ou outros consumidores, os números podem variar.
+
+> Nesta implementação inicial, eventos com JSON inválido recebem NACK sem reenvio; **sem DLQ configurada, eles são descartados**. Ainda não há tratamento robusto de falhas transitórias nem persistência, portanto não use esse fluxo para dados importantes.
+
+## Automação com Makefile
+
+Execute `make` ou `make help` para listar os atalhos.
+
+| Comando | Função |
+| --- | --- |
+| `make help` | Lista os atalhos disponíveis. |
+| `make setup` | Cria `deploy/.env` a partir do exemplo, se necessário. |
+| `make up` | Inicia o RabbitMQ no Docker. |
+| `make api` | Executa somente a API .NET localmente. |
+| `make worker` | Executa somente o consumidor de mensagens em .NET. |
+| `make dev` | Inicia RabbitMQ e API no mesmo terminal; **não inicia o Worker**. |
+| `make test-api` | Envia uma requisição de pedido válido com `curl`. |
+| `make build` | Compila a solução. |
+| `make ps` | Exibe o status dos containers. |
+| `make logs` | Acompanha os logs do RabbitMQ. |
+| `make stop` | Para o container preservando dados. |
+| `make down` | Remove o container/rede do Compose, preservando o volume. |
+
+Para desligar a API e o Worker, pressione `Ctrl+C` nos respectivos terminais. `make stop` e `make down` afetam somente os serviços Docker. **Evite `docker compose down -v`**, pois ele remove também o volume persistente do RabbitMQ.
 
 ## Problemas comuns
 
-- **`make: command not found`**: instale o GNU Make na sua máquina.
-- **Arquivo `deploy/.env` ausente**: execute `make setup` e configure sua senha antes de `make up`.
-- **`Connection refused`**: execute `make ps` e aguarde o RabbitMQ ficar saudável.
-- **`ACCESS_REFUSED` / autenticação**: confira usuário, senha, virtual host e as credenciais salvas no volume do RabbitMQ.
-- **Tentativa de conexão com `lab-rabbitmq`**: esse era o hostname na VPS. Na máquina local, configure `RabbitMQ:Host=localhost` nos User Secrets.
-- **Portas 5672 ou 15672 ocupadas**: verifique se já existe outra instância do RabbitMQ.
-- **API encerra imediatamente**: confira a saída do terminal e se `Program.cs` termina com `app.Run();`.
+- **`make: command not found`:** instale GNU Make.
+- **`deploy/.env` ausente:** execute `make setup` e edite a senha.
+- **API ou Worker não inicia:** confirme os User Secrets do respectivo projeto, a variável `DOTNET_ENVIRONMENT=Development` e a disponibilidade do RabbitMQ (`make ps`).
+- **`ACCESS_REFUSED`:** compare usuário/senha/vhost dos User Secrets com os criados no RabbitMQ (lembre-se da persistência do volume).
+- **Tentativa de conexão com `lab-rabbitmq`:** esse hostname era usado na rede Docker da VPS. Na máquina local, configure `RabbitMQ:Host=localhost`.
+- **Porta 5672/15672 ocupada:** confira se já existe outro RabbitMQ na máquina.
+- **A API retorna 202, mas o Worker não registra o pedido:** confirme se o Worker está ativo, inspecione seus logs e verifique a fila com `rabbitmqctl list_queues`.
+- **`read: -p: no coprocess`:** no ZSH, use `read -rs 'VAR?Prompt: '` em vez de `read -rsp` do Bash.
 
 ## Estrutura principal
 
 ```text
 OrderFlow/
 ├── src/
-│   └── OrderFlow.Api/       # API e publicador RabbitMQ
+│   ├── OrderFlow.Api/          # Endpoint e publicação de pedidos
+│   └── OrderFlow.Worker/       # Consumo RabbitMQ e ACK
 ├── tests/
-│   └── pedidos.http         # Requisições manuais
+│   └── pedidos.http            # Requisições manuais
 ├── deploy/
-│   ├── compose.yaml         # Infraestrutura local
-│   ├── .env.example         # Exemplo sem credenciais reais
-│   └── .env                 # Local, ignorado pelo Git
+│   ├── compose.yaml            # RabbitMQ local
+│   ├── .env.example            # Modelo sem segredos
+│   └── .env                    # Local, não versionado
 ├── docs/
-├── Makefile                 # Comandos de desenvolvimento
+├── Makefile                    # Comandos de desenvolvimento
 ├── OrderFlow.slnx
 └── README.md
 ```
 
 ## Próximas etapas
 
-1. Criar `OrderFlow.Worker` e consumir `pedidos.criados`.
-2. Persistir pedidos e consultar status.
+1. Adicionar testes automatizados e consolidar tratamento de falhas do consumidor.
+2. Persistir pedidos e consultar seu status.
 3. Implementar idempotência, retry e dead-letter queue.
-4. Adicionar testes automatizados, logs estruturados e observabilidade.
-5. Preparar Compose para deploy integral do sistema.
+4. Adicionar logs estruturados e observabilidade.
+5. Preparar Docker Compose para deploy integral do sistema.
